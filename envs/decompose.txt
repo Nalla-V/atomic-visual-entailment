@@ -1,0 +1,9 @@
+torch>=2.4,<2.6
+transformers>=4.51,<5
+accelerate>=1.0
+tokenizers>=0.21
+safetensors>=0.4
+sentencepiece>=0.2
+numpy>=2.0,<3
+jsonlines>=4.0
+rank_bm25>=0.2.2

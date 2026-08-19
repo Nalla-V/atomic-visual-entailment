@@ -1,0 +1,21 @@
+# secrets and local config
+env.sh
+
+# data and outputs
+Input/
+Output/
+*.jsonl
+
+# models and caches
+Models/
+.hf_cache/
+*.safetensors
+*.bin
+
+# logs
+Logs/
+slurm-*.out
+
+# python
+__pycache__/
+*.pyc
