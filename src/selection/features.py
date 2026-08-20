@@ -251,6 +251,8 @@ def _extract_common(res):
         "score_prediction": score_pred,
         "scores": scores,
         "parse_ok": bool(res.get("parse_ok", True)),
+        "reason": safe_text(res.get("reason", "")),
+        "raw_result": res,
         **diag,
     }
 
@@ -287,6 +289,8 @@ def extract_self_decompose(row):
         "score_prediction": score_pred,
         "scores": scores,
         "parse_ok": bool(res.get("parse_ok", True)),
+        "reason": safe_text(res.get("reason", "")),
+        "raw_result": res,
         **diag,
     }
 

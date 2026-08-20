@@ -1,15 +1,15 @@
 #!/bin/bash
-#SBATCH --job-name=eval_selector
-#SBATCH --output=Logs/eval_selector_%j.out
-#SBATCH --error=Logs/eval_selector_%j.err
+#SBATCH --job-name=ground_summary
+#SBATCH --output=Logs/ground_summary_%j.out
+#SBATCH --error=Logs/ground_summary_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
-#SBATCH --time=01:00:00
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=16G
+#SBATCH --time=00:30:00
 #SBATCH --partition=cpu-short
 
-SPLIT="${1:?usage: job_evaluate_selector.sh SPLIT}"
+SPLIT="${1:?usage: job_grounding_summary.sh SPLIT}"
 
 echo "Job started: $(date)"
 
@@ -25,6 +25,6 @@ conda activate "$ENV_SELECTION"
 
 cd "$REPO_ROOT"
 
-python -u -m src.selection.evaluate --split "$SPLIT"
+python -u -m src.grounding.summary --split "$SPLIT"
 
 echo "Job finished: $(date)"

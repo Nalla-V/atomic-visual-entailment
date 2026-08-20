@@ -9,8 +9,6 @@
 #SBATCH --time=02:00:00
 #SBATCH --partition=cpu-short
 
-OUTPUT_NAME="${1:-AVE_train_learned_selector_v3_rebuild}"
-
 echo "========================================"
 echo "Job started: $(date)"
 echo "Node: $HOSTNAME"

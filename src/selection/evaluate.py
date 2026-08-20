@@ -3,7 +3,8 @@
     python -m src.selection.evaluate --split dev
 
 Loads the saved model and its feature columns, rebuilds meta-features from the
-cleaned prediction files, and reports accuracy and macro-F1.
+cleaned prediction files, reports accuracy and macro-F1, and writes the input
+file used by the grounding stage.
 """
 
 import argparse
@@ -25,6 +26,12 @@ from src.selection.train import metric_report
 SEP = "=" * 140
 DASH = "-" * 140
 
+GROUNDABLE_FINAL_LABELS = {"entailment", "contradiction"}
+
+
+# ============================================================
+# PATHS
+# ============================================================
 
 def build_paths(split, train_run_name, output_name,
                 qwen_dir_name="qwen3_predictions_clean_v2",
@@ -51,6 +58,7 @@ def build_paths(split, train_run_name, output_name,
         "summary_csv": os.path.join(output_dir, f"ave_ls_v3_{split}_summary.csv"),
         "confusion_csv": os.path.join(output_dir, f"ave_ls_v3_{split}_confusion_matrices.csv"),
         "predictions_jsonl": os.path.join(output_dir, f"ave_ls_v3_{split}_predictions.jsonl"),
+        "grounding_jsonl": os.path.join(output_dir, f"ave_ls_v3_{split}_grounding_input.jsonl"),
         "feature_column_check_json": os.path.join(
             output_dir, f"ave_ls_v3_{split}_feature_column_check.json"),
         "report_txt": os.path.join(output_dir, f"ave_ls_v3_{split}_report.txt"),
@@ -74,6 +82,10 @@ def build_file_candidates(split):
     }
 
 
+# ============================================================
+# LOADING
+# ============================================================
+
 def make_default_output(method_key, key):
     """A candidate row missing for this key becomes a neutral, uniform vote."""
     scores = {lab: 1.0 / len(F.LABELS) for lab in F.LABELS}
@@ -86,6 +98,7 @@ def make_default_output(method_key, key):
         "parse_ok": False,
         "parse_error": "missing prediction row for this key",
         "missing_candidate_output": True,
+        "raw_result": {},
         "source_row_key": key,
         **diag,
     }
@@ -205,6 +218,175 @@ def validate_feature_columns(X, feature_columns, paths):
     return check
 
 
+# ============================================================
+# GROUNDING INPUT
+# ============================================================
+
+def parse_method_key(method_key):
+    if method_key.startswith("qwen"):
+        model = "qwen3"
+    elif method_key.startswith("internvl"):
+        model = "internvl3"
+    else:
+        model = "unknown"
+
+    if "baseline" in method_key:
+        method, result_key = "baseline", "full_hypothesis_results"
+    elif "joint" in method_key:
+        method, result_key = "joint_atomic", "joint_atom_results"
+    elif "self_decompose" in method_key:
+        method, result_key = "self_decompose", "self_decompose_results"
+    else:
+        method, result_key = "unknown", ""
+
+    if "structured" in method_key:
+        prompt = "structured"
+    elif "simple" in method_key:
+        prompt = "simple"
+    else:
+        prompt = "unknown"
+
+    return {
+        "candidate_key": method_key,
+        "selected_candidate": method_key,
+        "selected_model": model,
+        "selected_method": method,
+        "selected_prompt": prompt,
+        "result_key": result_key,
+    }
+
+
+def normalize_atom_observation(obs, default_label="neutral"):
+    return {
+        "atom": F.safe_text(obs.get("atom", obs.get("claim",
+                            obs.get("fact", obs.get("text", ""))))),
+        "atom_label": F.normalize_label(obs.get("label",
+                                        obs.get("status", default_label))),
+        "vlm_reasoning": F.safe_text(obs.get("reason", obs.get("evidence",
+                                     obs.get("visible_evidence", "")))),
+    }
+
+
+def extract_self_decompose_atoms(raw_result):
+    atoms = raw_result.get("decomposed_atoms", [])
+    if not isinstance(atoms, list):
+        return []
+
+    cleaned = []
+    for idx, item in enumerate(atoms):
+        if isinstance(item, dict):
+            obs = normalize_atom_observation(item)
+            if obs["atom"]:
+                cleaned.append({"atom_index": item.get("atom_index", idx), **obs})
+        elif isinstance(item, str):
+            text = F.safe_text(item)
+            if text:
+                cleaned.append({"atom_index": idx, "atom": text,
+                                "atom_label": "neutral", "vlm_reasoning": ""})
+    return cleaned
+
+
+def fallback_evidence_item(meta, final_label, full_reason, evidence_source):
+    return [{
+        "evidence_index": 1,
+        "atom": F.safe_text(meta.get("hypothesis", "")),
+        "atom_label": final_label,
+        "vlm_reasoning": full_reason,
+        "evidence_source": evidence_source,
+    }]
+
+
+def build_evidence_items_for_selected_output(selected_candidate, selected_output,
+                                             meta, final_label):
+    """Method-agnostic evidence items for the phrase extractor.
+
+    Joint atomic uses matching atom_observations, self-decompose uses matching
+    decomposed_atoms, and baseline treats the hypothesis as a single evidence
+    unit carrying the sentence-level reason.
+    """
+    final_label = F.normalize_label(final_label)
+    selected_method = parse_method_key(selected_candidate)["selected_method"]
+
+    raw_result = selected_output.get("raw_result", {}) or {}
+    if not isinstance(raw_result, dict):
+        raw_result = {}
+
+    full_reason = F.safe_text(selected_output.get("reason",
+                                                  raw_result.get("reason", "")))
+    evidence_items = []
+
+    if selected_method == "joint_atomic":
+        observations = raw_result.get("atom_observations", [])
+        if isinstance(observations, list):
+            for obs in observations:
+                if not isinstance(obs, dict):
+                    continue
+                clean = normalize_atom_observation(obs)
+                if not clean["atom"]:
+                    continue
+                if clean["atom_label"] == final_label:
+                    evidence_items.append({
+                        "evidence_index": len(evidence_items) + 1,
+                        **clean,
+                        "evidence_source": "selected_joint_atom_observation",
+                    })
+        if evidence_items:
+            return evidence_items[:4], full_reason
+        return fallback_evidence_item(
+            meta, final_label, full_reason,
+            "selected_joint_final_reason_fallback"), full_reason
+
+    if selected_method == "self_decompose":
+        self_atoms = extract_self_decompose_atoms(raw_result)
+        for item in self_atoms:
+            if item["atom_label"] == final_label:
+                evidence_items.append({
+                    "evidence_index": len(evidence_items) + 1,
+                    "atom": item["atom"],
+                    "atom_label": item["atom_label"],
+                    "vlm_reasoning": item.get("vlm_reasoning", ""),
+                    "evidence_source": "selected_self_decompose_atom",
+                })
+        if evidence_items:
+            return evidence_items[:4], full_reason
+        if self_atoms:
+            # No atom carries the final label, so keep the first one and
+            # override its label with the final label.
+            first = self_atoms[0]
+            return [{
+                "evidence_index": 1,
+                "atom": first["atom"],
+                "atom_label": final_label,
+                "vlm_reasoning": full_reason or first.get("vlm_reasoning", ""),
+                "evidence_source": "selected_self_decompose_final_reason_fallback",
+            }], full_reason
+        return fallback_evidence_item(
+            meta, final_label, full_reason,
+            "selected_self_decompose_hypothesis_fallback"), full_reason
+
+    # Baseline has no atom observations, so the hypothesis is the evidence unit.
+    return [{
+        "evidence_index": 1,
+        "atom": F.safe_text(meta.get("hypothesis", "")),
+        "atom_label": final_label,
+        "vlm_reasoning": full_reason,
+        "evidence_source": "selected_baseline_full_hypothesis_reason",
+    }], full_reason
+
+
+def grounding_filter_reason(final_label, candidate_matches_learned_label):
+    final_label = F.normalize_label(final_label)
+    if not candidate_matches_learned_label:
+        return False, "selected_candidate_label_does_not_match_learned_final_label"
+    if final_label not in GROUNDABLE_FINAL_LABELS:
+        return False, "final_label_is_neutral_not_grounded"
+    return True, "candidate_matched_and_final_label_is_entailment_or_contradiction"
+
+
+# ============================================================
+# OUTPUT
+# ============================================================
+
 def save_confusion_csv(path, matrix):
     rows = []
     for i, gold in enumerate(F.LABELS):
@@ -214,6 +396,10 @@ def save_confusion_csv(path, matrix):
         rows.append(row)
     pd.DataFrame(rows).to_csv(path, index=False)
 
+
+# ============================================================
+# MAIN
+# ============================================================
 
 def run(split, train_run_name, output_name):
     paths = build_paths(split, train_run_name, output_name)
@@ -273,6 +459,83 @@ def run(split, train_run_name, output_name):
               f"recall={pc['recall']:.4f} f1={pc['f1']:.4f} support={pc['support']}")
     print(DASH)
 
+    # Per-row output, plus the subset that is eligible for grounding.
+    pred_rows, grounding_rows = [], []
+    grounding_eligible_count = 0
+    filter_counter = Counter()
+
+    for idx, meta in enumerate(meta_rows):
+        learned_label = learned_labels[idx]
+        outputs = outputs_rows[idx]
+
+        selected_method, alignment_reason = F.align_candidate_to_label(
+            learned_label, outputs, method_keys)
+        selected_output = outputs[selected_method]
+        selected_candidate_label = F.normalize_label(
+            selected_output.get("prediction", "neutral"))
+        selected_scores = F.scores_to_probs(selected_output.get("scores", {}))
+
+        candidate_matches_learned = selected_candidate_label == learned_label
+        eligible, filter_reason = grounding_filter_reason(
+            learned_label, candidate_matches_learned)
+        filter_counter[filter_reason] += 1
+
+        identity = parse_method_key(selected_method)
+        evidence_items, full_reason = build_evidence_items_for_selected_output(
+            selected_method, selected_output, meta, learned_label)
+
+        pred_rows.append({
+            "row_id": meta["row_id"],
+            "Flickr30K_ID": meta["Flickr30K_ID"],
+            "hypothesis": meta["hypothesis"],
+            "atomic_facts": meta["atomic_facts"],
+            "gold": meta["gold"],
+            "final_label": learned_label,
+            "final_correct": int(learned_label == meta["gold"]),
+            "selected_candidate": selected_method,
+            "selected_candidate_label": selected_candidate_label,
+            "selected_candidate_reason": full_reason,
+            "selected_candidate_scores": selected_scores,
+            "candidate_matches_learned_label": int(candidate_matches_learned),
+            "grounding_eligible": bool(eligible),
+            "grounding_filter_reason": filter_reason,
+            "alignment_reason": alignment_reason,
+        })
+
+        if eligible:
+            grounding_eligible_count += 1
+            grounding_rows.append({
+                "row_id": meta["row_id"],
+                "row_key_occurrence": meta["row_key_occurrence"],
+                "Flickr30K_ID": meta["Flickr30K_ID"],
+                "hypothesis": meta["hypothesis"],
+                "annotator_label": meta["gold"],
+                "gold": meta["gold"],
+                "final_label": learned_label,
+                "prediction": learned_label,
+                "selected_candidate": selected_method,
+                "selected_model": identity["selected_model"],
+                "selected_method": identity["selected_method"],
+                "selected_prompt": identity["selected_prompt"],
+                "selected_candidate_label": selected_candidate_label,
+                "candidate_matches_learned_label": True,
+                "grounding_eligible": True,
+                "grounding_filter_reason": filter_reason,
+                "atomic_facts": meta.get("atomic_facts", []),
+                "reason": full_reason,
+                "evidence_items": evidence_items,
+                "selected_output": selected_output,
+            })
+
+    F.write_jsonl(paths["predictions_jsonl"], pred_rows)
+    F.write_jsonl(paths["grounding_jsonl"], grounding_rows)
+
+    print(f"\nGrounding eligible: {grounding_eligible_count} / {len(meta_rows)} "
+          f"({grounding_eligible_count / len(meta_rows):.3f})")
+    for reason, count in filter_counter.most_common():
+        print(f"  {reason:<62} {count:>7}")
+    print(f"\nGrounding input: {paths['grounding_jsonl']}")
+
     pd.DataFrame([{
         "split": split,
         "n": res["n"],
@@ -284,42 +547,19 @@ def run(split, train_run_name, output_name):
         "entailment_recall": res["per_class"]["entailment"]["recall"],
         "neutral_recall": res["per_class"]["neutral"]["recall"],
         "contradiction_recall": res["per_class"]["contradiction"]["recall"],
+        "grounding_eligible_count": grounding_eligible_count,
+        "grounding_eligible_rate": grounding_eligible_count / len(meta_rows),
         "feature_variant": selected_config["selected_feature_variant"],
         "classifier_config": selected_config["selected_classifier_config"],
     }]).to_csv(paths["summary_csv"], index=False)
 
     save_confusion_csv(paths["confusion_csv"], res["confusion_matrix"])
 
-    pred_rows = []
-    for idx, meta in enumerate(meta_rows):
-        learned_label = learned_labels[idx]
-        outputs = outputs_rows[idx]
-        selected_method, alignment_reason = F.align_candidate_to_label(
-            learned_label, outputs, method_keys)
-        selected_output = outputs[selected_method]
-        selected_scores = F.scores_to_probs(selected_output.get("scores", {}))
-
-        pred_rows.append({
-            "row_id": meta["row_id"],
-            "Flickr30K_ID": meta["Flickr30K_ID"],
-            "hypothesis": meta["hypothesis"],
-            "atomic_facts": meta["atomic_facts"],
-            "gold": meta["gold"],
-            "final_label": learned_label,
-            "final_correct": int(learned_label == meta["gold"]),
-            "selected_candidate": selected_method,
-            "selected_candidate_label": F.normalize_label(
-                selected_output.get("prediction", "neutral")),
-            "selected_candidate_reason": F.safe_text(selected_output.get("reason", "")),
-            "selected_candidate_scores": selected_scores,
-            "alignment_reason": alignment_reason,
-        })
-
-    F.write_jsonl(paths["predictions_jsonl"], pred_rows)
-
     with open(paths["report_txt"], "w", encoding="utf-8") as f:
-        f.write(json.dumps({"split": split, **{k: v for k, v in res.items()
-                                               if k != "per_class"}}, indent=2))
+        f.write(json.dumps({"split": split,
+                            "grounding_eligible_count": grounding_eligible_count,
+                            **{k: v for k, v in res.items() if k != "per_class"}},
+                           indent=2))
 
     print(f"\nWritten to {paths['output_dir']}")
     return res

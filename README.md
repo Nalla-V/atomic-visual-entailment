@@ -44,6 +44,7 @@ to be edited anywhere else.
 | `ENV_DECOMPOSE` | conda environment name for the decomposition stage |
 | `ENV_PREDICT` | conda environment name for the prediction stage |
 | `ENV_SELECTION` | conda environment name for the selection stage |
+| `ENV_GROUNDING` | conda environment name for the grounding stage |
 | `HF_TOKEN` | HuggingFace token, needed only for gated models |
 | `HF_HOME` | model cache directory |
 
@@ -62,10 +63,20 @@ pip install -r envs/predict.txt
 conda create -n selection_env python=3.10 -c conda-forge -y
 conda activate selection_env
 pip install -r envs/selection.txt
+
+conda create -n grounding_env python=3.10 -c conda-forge -y
+conda activate grounding_env
+pip install -r envs/grounding.txt
 ```
 
 The selection stage runs on CPU only, so `envs/selection.txt` has no CUDA
 dependencies.
+
+The environments are not interchangeable. Decomposition, prediction and
+grounding phrase extraction need `transformers` 4.x, while Grounding DINO
+needs 5.x: its image processor changed between the two major versions, and
+using the wrong one shifts every predicted box by a few pixels without
+raising an error.
 
 ## Dataset
 
@@ -111,15 +122,21 @@ src/
 │   ├── joint.py                 joint atomic prediction
 │   ├── selfdecompose.py         self-decomposition prediction
 │   └── independent.py           independent atomic prediction
-└── selection/
-    ├── voting.py                majority voting over the candidate pool
-    ├── train.py                 learned selector training and model selection
-    ├── evaluate.py              learned selector evaluation on dev and test
-    ├── analysis.py              ablations, importance, and the figures
-    ├── features.py              meta-feature extraction
-    ├── classifiers.py           classifier configurations
-    ├── candidates.py            the K=12 candidate pool
-    └── common.py                metrics and shared helpers
+├── selection/
+│   ├── voting.py                majority voting over the candidate pool
+│   ├── train.py                 learned selector training and model selection
+│   ├── evaluate.py              learned selector evaluation on dev and test
+│   ├── analysis.py              ablations, importance, and the figures
+│   ├── features.py              meta-feature extraction
+│   ├── classifiers.py           classifier configurations
+│   ├── candidates.py            the K=12 candidate pool
+│   └── common.py                metrics and shared helpers
+└── grounding/
+    ├── phrases.py               reasoning to groundable phrases
+    ├── detect.py                Grounding DINO boxes and figures
+    ├── summary.py               Flickr30k Entities evaluation
+    ├── prompts.py               phrase extraction prompt
+    └── common.py                phrase cleaning helpers
 
 jobs/                            SLURM jobs, one per stage
 envs/                            pip requirements, one per stage
@@ -298,3 +315,69 @@ saved CSVs without recomputing.
 
 Training is seeded, so a rerun reproduces the same model and the same
 validation metrics.
+
+### Grounding
+
+Links the selected prediction to visible image regions. Grounding applies only
+to entailment and contradiction predictions, and only when the selected
+candidate agrees with the final label; the evaluation stage marks which rows
+qualify.
+
+Three steps, in order.
+
+#### Phrase extraction
+
+Qwen3-8B turns each piece of evidence from the selected candidate's reasoning
+into a short visual phrase, plus a shorter match phrase used later for
+Flickr30k Entities matching.
+
+```bash
+sbatch jobs/job_grounding_phrases.sh SPLIT [LIMIT]
+```
+
+Extraction stops once each groundable label reaches `--target-per-label`,
+2500 by default, so grounding runs on a sample rather than the whole split.
+
+#### Detection
+
+```bash
+sbatch jobs/job_grounding_detect.sh SPLIT [LIMIT]
+```
+
+Grounding DINO localises each phrase. Near-duplicate boxes are suppressed and
+the top three are kept, which is what makes Recall@3 and Mean IoU@3 meaningful.
+Two figures are written per row: a diagnostic panel showing the hypothesis,
+atoms, phrases and reasoning beside the boxed image, and a report-ready image
+with the boxes alone. Pass `--no-images` to skip both.
+
+| Setting | Value |
+|---|---|
+| Model | `IDEA-Research/grounding-dino-base` |
+| Box threshold | 0.35 |
+| Text threshold | 0.25 |
+| Boxes kept | 3 |
+
+#### Evaluation
+
+```bash
+sbatch jobs/job_grounding_summary.sh SPLIT
+```
+
+Matches each phrase to human-annotated Flickr30k Entities phrases, then reports
+coverage, Recall@1, Recall@3 and mean best IoU@3 over matched rows, split by
+predicted label. Reads `annotations.zip` directly, so the archive does not need
+unpacking.
+
+Without SLURM:
+
+```bash
+source env.sh
+conda activate $ENV_GROUNDING
+python -m src.grounding.phrases --split test
+python -m src.grounding.detect --split test
+conda activate $ENV_SELECTION
+python -m src.grounding.summary --split test
+```
+
+Phrase extraction uses the decomposition environment, detection uses the
+grounding environment, and the evaluation needs only the standard library.
