@@ -1,0 +1,11 @@
+torch>=2.4,<2.6
+transformers>=4.51,<5
+accelerate>=1.0
+tokenizers>=0.21
+safetensors>=0.4
+sentencepiece>=0.2
+numpy>=2.0,<3
+pillow>=10.0
+jsonlines>=4.0
+qwen-vl-utils>=0.0.8
+torchvision>=0.19,<0.21

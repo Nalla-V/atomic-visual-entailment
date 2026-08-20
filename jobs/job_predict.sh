@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=decompose
-#SBATCH --output=Logs/decompose_%j.out
-#SBATCH --error=Logs/decompose_%j.err
+#SBATCH --job-name=predict
+#SBATCH --output=Logs/predict_%j.out
+#SBATCH --error=Logs/predict_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
@@ -9,10 +9,12 @@
 #SBATCH --time=01:00:00
 #SBATCH --partition=gpu-short
 #SBATCH --gres=gpu:1
+#SBATCH --constraint="A100.4g.40gb|A100.3g.40gb"
 
-MODEL="${1:-qwen32}"
-SPLIT="${2:-dev}"
-LIMIT="${3:-}"
+VLM="${1:?usage: job_predict.sh VLM SPLIT METHOD [LIMIT]}"
+SPLIT="${2:?usage: job_predict.sh VLM SPLIT METHOD [LIMIT]}"
+METHOD="${3:?usage: job_predict.sh VLM SPLIT METHOD [LIMIT]}"
+LIMIT="${4:-}"
 
 echo "========================================"
 echo "Job started: $(date)"
@@ -29,18 +31,18 @@ source "$SLURM_SUBMIT_DIR/env.sh"
 
 source /easybuild/software/Miniconda3/24.7.1-0/etc/profile.d/conda.sh
 conda activate base
-conda activate "$ENV_DECOMPOSE"
+conda activate "$ENV_PREDICT"
 
 cd "$REPO_ROOT"
 
 echo "Python: $(which python)"
-echo "model=$MODEL split=$SPLIT limit=$LIMIT"
+echo "vlm=$VLM split=$SPLIT limit=$LIMIT method=$METHOD"
 
-echo "Running decomposition..."
+ARGS="--vlm $VLM --split $SPLIT --method $METHOD"
 if [ -n "$LIMIT" ]; then
-    python -u -m src.decomposition.decompose --model "$MODEL" --split "$SPLIT" --limit "$LIMIT"
-else
-    python -u -m src.decomposition.decompose --model "$MODEL" --split "$SPLIT"
+    ARGS="$ARGS --limit $LIMIT"
 fi
+
+python -u -m src.prediction.predict $ARGS
 
 echo "Job finished: $(date)"

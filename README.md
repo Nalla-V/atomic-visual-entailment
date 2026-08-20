@@ -42,6 +42,7 @@ to be edited anywhere else.
 | `DATA_ROOT` | directory holding `Input/` and `Output/` |
 | `REPO_ROOT` | where this repository is checked out |
 | `ENV_DECOMPOSE` | conda environment name for the decomposition stage |
+| `ENV_PREDICT` | conda environment name for the prediction stage |
 | `HF_TOKEN` | HuggingFace token, needed only for gated models |
 | `HF_HOME` | model cache directory |
 
@@ -52,6 +53,10 @@ text models need different library versions.
 conda create -n decompose_env python=3.10 -c conda-forge -y
 conda activate decompose_env
 pip install -r envs/decompose.txt
+
+conda create -n predict_env python=3.10 -c conda-forge -y
+conda activate predict_env
+pip install -r envs/predict.txt
 ```
 
 ## Dataset
@@ -86,12 +91,21 @@ $DATA_ROOT/
 ```
 src/
 ├── config.py                    paths, model registry, shared settings
-└── decomposition/
-    ├── decompose.py             hypothesis to atomic facts
-    └── prompts.py               decomposition prompt
+├── decomposition/
+│   ├── decompose.py             hypothesis to atomic facts
+│   └── prompts.py               decomposition prompt
+└── prediction/
+    ├── predict.py               entry point, resume, output writing
+    ├── models.py                VLM registry and per-family adapters
+    ├── common.py                parsing, label scoring, confidence diagnostics
+    ├── prompts.py               prediction prompts
+    ├── baseline.py              full-hypothesis prediction
+    ├── joint.py                 joint atomic prediction
+    ├── selfdecompose.py         self-decomposition prediction
+    └── independent.py           independent atomic prediction
 
-jobs/job_decompose.sh            SLURM job for the decomposition stage
-envs/decompose.txt               pip requirements for the decomposition stage
+jobs/                            SLURM jobs, one per stage
+envs/                            pip requirements, one per stage
 env.example.sh                   template for env.sh
 ```
 
@@ -146,3 +160,64 @@ Output goes to `$DATA_ROOT/Output/decompose_atoms_<model>_<split>.jsonl`, with a
 matching `_debug` file holding the raw model output. Decoding is greedy, so
 repeated runs give identical output. Runs append and resume from the last
 completed record, so a job that hits its walltime can be resubmitted unchanged.
+
+### Prediction
+
+Runs the VLMs over each image with the full hypothesis and with the atomic facts
+from the decomposition stage. Both prompt styles, simple and structured, run
+together from a single model load.
+
+```bash
+sbatch jobs/job_predict.sh VLM SPLIT METHOD [LIMIT]
+```
+
+Arguments are positional:
+
+```bash
+sbatch jobs/job_predict.sh internvl dev all 10   # quick check, all methods
+sbatch jobs/job_predict.sh internvl test all     # full test split
+sbatch jobs/job_predict.sh qwen3 test joint      # one method
+sbatch --partition=gpu-a100-80g --mem=80G --gres=gpu:a100:1 \
+       jobs/job_predict.sh qwen3vl_32b dev all   # 32B model
+```
+
+Without SLURM:
+
+```bash
+source env.sh
+conda activate $ENV_PREDICT
+python -m src.prediction.predict --vlm internvl --split test --method all
+```
+
+| Flag | Values | Default |
+|---|---|---|
+| `--vlm` | see table below | required |
+| `--split` | `train`, `dev`, `test` | required |
+| `--method` | `baseline`, `joint`, `selfdecompose`, `independent`, `all` | required |
+| `--limit` | integer | all records |
+| `--decomposer` | decomposer whose atoms to read | `qwen32` |
+
+| VLM | Hub ID | Precision | Methods |
+|---|---|---|---|
+| `qwen3` | `Qwen/Qwen3-VL-8B-Instruct` | bfloat16 | all four |
+| `internvl` | `OpenGVLab/InternVL3-8B-hf` | bfloat16 | all four |
+| `qwen3vl_32b` | `Qwen/Qwen3-VL-32B-Instruct` | bfloat16 | baseline |
+| `llava` | `llava-hf/llava-onevision-qwen2-7b-ov-hf` | float16 | baseline |
+| `idefics2` | `HuggingFaceM4/idefics2-8b` | float16 | baseline |
+| `qwen2vl_2b` | `Qwen/Qwen2-VL-2B-Instruct` | bfloat16 | baseline |
+| `internvl3_1b` | `OpenGVLab/InternVL3-1B-hf` | bfloat16 | baseline |
+
+`qwen3` and `internvl` form the AVE prediction pool and run all four prediction
+methods. The other five appear in the VLM comparison, which uses full-hypothesis
+prediction, so `all` resolves to `baseline` for them.
+
+| Method | What the VLM sees |
+|---|---|
+| `baseline` | the full hypothesis |
+| `joint` | the atomic facts together |
+| `selfdecompose` | the hypothesis, decomposed by the VLM itself |
+| `independent` | one atomic fact at a time |
+
+Output goes to `$DATA_ROOT/Output/<vlm>_predictions/<method>_<prompt>_<split>.jsonl`,
+with a matching `_debug` file. Runs resume by input line index, so a job that
+hits its walltime can be resubmitted unchanged.
