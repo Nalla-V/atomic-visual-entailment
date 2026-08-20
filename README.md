@@ -43,6 +43,7 @@ to be edited anywhere else.
 | `REPO_ROOT` | where this repository is checked out |
 | `ENV_DECOMPOSE` | conda environment name for the decomposition stage |
 | `ENV_PREDICT` | conda environment name for the prediction stage |
+| `ENV_SELECTION` | conda environment name for the selection stage |
 | `HF_TOKEN` | HuggingFace token, needed only for gated models |
 | `HF_HOME` | model cache directory |
 
@@ -57,7 +58,14 @@ pip install -r envs/decompose.txt
 conda create -n predict_env python=3.10 -c conda-forge -y
 conda activate predict_env
 pip install -r envs/predict.txt
+
+conda create -n selection_env python=3.10 -c conda-forge -y
+conda activate selection_env
+pip install -r envs/selection.txt
 ```
+
+The selection stage runs on CPU only, so `envs/selection.txt` has no CUDA
+dependencies.
 
 ## Dataset
 
@@ -94,15 +102,24 @@ src/
 ├── decomposition/
 │   ├── decompose.py             hypothesis to atomic facts
 │   └── prompts.py               decomposition prompt
-└── prediction/
-    ├── predict.py               entry point, resume, output writing
-    ├── models.py                VLM registry and per-family adapters
-    ├── common.py                parsing, label scoring, confidence diagnostics
-    ├── prompts.py               prediction prompts
-    ├── baseline.py              full-hypothesis prediction
-    ├── joint.py                 joint atomic prediction
-    ├── selfdecompose.py         self-decomposition prediction
-    └── independent.py           independent atomic prediction
+├── prediction/
+│   ├── predict.py               entry point, resume, output writing
+│   ├── models.py                VLM registry and per-family adapters
+│   ├── common.py                parsing, label scoring, confidence diagnostics
+│   ├── prompts.py               prediction prompts
+│   ├── baseline.py              full-hypothesis prediction
+│   ├── joint.py                 joint atomic prediction
+│   ├── selfdecompose.py         self-decomposition prediction
+│   └── independent.py           independent atomic prediction
+└── selection/
+    ├── voting.py                majority voting over the candidate pool
+    ├── train.py                 learned selector training and model selection
+    ├── evaluate.py              learned selector evaluation on dev and test
+    ├── analysis.py              ablations, importance, and the figures
+    ├── features.py              meta-feature extraction
+    ├── classifiers.py           classifier configurations
+    ├── candidates.py            the K=12 candidate pool
+    └── common.py                metrics and shared helpers
 
 jobs/                            SLURM jobs, one per stage
 envs/                            pip requirements, one per stage
@@ -221,3 +238,63 @@ prediction, so `all` resolves to `baseline` for them.
 Output goes to `$DATA_ROOT/Output/<vlm>_predictions/<method>_<prompt>_<split>.jsonl`,
 with a matching `_debug` file. Runs resume by input line index, so a job that
 hits its walltime can be resubmitted unchanged.
+
+### Selection
+
+Combines the candidate predictions into one label. Both approaches read the
+prediction files written by the previous stage and run on CPU.
+
+#### Majority voting
+
+```bash
+sbatch jobs/job_voting.sh
+```
+
+Reports the best individual candidates, intra-model voting per VLM (K=6),
+inter-model voting over the full pool (K=12), and the oracle upper bound.
+Output goes to `$DATA_ROOT/Output/majority_voting_summary/`.
+
+#### Learned selection
+
+Training compares four feature variants against seven classifier
+configurations on one fixed stratified split, then saves the best model per
+variant.
+
+```bash
+sbatch jobs/job_train_selector.sh [OUTPUT_NAME]
+```
+
+| Flag | Meaning | Default |
+|---|---|---|
+| `--output-name` | output folder under `Output/` | `AVE_train_learned_selector_v3` |
+| `--validation-size` | held-out fraction of the training pool | `0.20` |
+| `--random-state` | seed for the split and the classifiers | `42` |
+
+| Feature variant | Candidate pool |
+|---|---|
+| `baseline_only` | full-hypothesis only, K=4 |
+| `simple_atomic` | atomic methods, simple prompt, K=4 |
+| `structured_atomic` | atomic methods, structured prompt, K=4 |
+| `full_12_methods` | 2 VLMs x 3 methods x 2 prompts, K=12 |
+
+Evaluation loads the saved model and applies it to a split:
+
+```bash
+sbatch jobs/job_evaluate_selector.sh dev [TRAIN_RUN_NAME]
+sbatch jobs/job_evaluate_selector.sh test [TRAIN_RUN_NAME]
+```
+
+The post-training analyses are separate, since they take considerably longer
+than training itself:
+
+```bash
+sbatch jobs/job_analysis.sh [OUTPUT_NAME]
+```
+
+This runs the data-efficiency sweep, permutation importance, and the
+selector-objective ablation, and writes the figures. Use
+`--skip data_efficiency importance objective` to redraw the figures from the
+saved CSVs without recomputing.
+
+Training is seeded, so a rerun reproduces the same model and the same
+validation metrics.
