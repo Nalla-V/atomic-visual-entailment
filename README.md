@@ -25,6 +25,12 @@ supervision.
 * [Dataset](#dataset)
 * [Repository layout](#repository-layout)
 * [Run](#run)
+  * [Decomposition](#decomposition)
+  * [Prediction](#prediction)
+  * [Selection](#selection)
+  * [Grounding](#grounding)
+  * [Results](#results)
+  * [Refinement ablation](#refinement-ablation)
 
 ## Installation
 
@@ -45,6 +51,7 @@ to be edited anywhere else.
 | `ENV_PREDICT` | conda environment name for the prediction stage |
 | `ENV_SELECTION` | conda environment name for the selection stage |
 | `ENV_GROUNDING` | conda environment name for the grounding stage |
+| `ENV_REFINEMENT` | conda environment name for Florence-2 captioning |
 | `HF_TOKEN` | HuggingFace token, needed only for gated models |
 | `HF_HOME` | model cache directory |
 
@@ -67,16 +74,19 @@ pip install -r envs/selection.txt
 conda create -n grounding_env python=3.10 -c conda-forge -y
 conda activate grounding_env
 pip install -r envs/grounding.txt
+
+conda create -n refinement_env python=3.10 -c conda-forge -y
+conda activate refinement_env
+pip install -r envs/refinement.txt
 ```
 
 The selection stage runs on CPU only, so `envs/selection.txt` has no CUDA
 dependencies.
 
-The environments are not interchangeable. Decomposition, prediction and
-grounding phrase extraction need `transformers` 4.x, while Grounding DINO
-needs 5.x: its image processor changed between the two major versions, and
-using the wrong one shifts every predicted box by a few pixels without
-raising an error.
+The environments are not interchangeable. Grounding DINO, Florence-2 and Qwen3
+each need a different `transformers` major version, and the mismatches are not
+always loud: Grounding DINO on the wrong version shifts every predicted box by
+a few pixels without raising an error. The pins are in `envs/`.
 
 ## Dataset
 
@@ -136,12 +146,13 @@ src/
 │   ├── summary.py               Flickr30k Entities evaluation
 │   ├── prompts.py               phrase extraction prompt
 │   └── common.py                phrase cleaning helpers
-└── results/
-    ├── vlm_comparison.py        VLM comparison on full-hypothesis prediction
-    ├── candidate_analysis.py    all candidate configurations, by method and prompt
-    ├── ave_ls_summary.py        AVE-LS against majority voting
-    ├── hypothesis_bias.py       blank-image comparison
-    └── ablation_summary.py      refinement ablation
+├── results/
+│   ├── vlm_comparison.py        VLM comparison on full-hypothesis prediction
+│   ├── candidate_analysis.py    all candidate configurations, by method and prompt
+│   ├── ave_ls_summary.py        AVE-LS against majority voting
+│   ├── hypothesis_bias.py       blank-image comparison
+│   └── ablation_summary.py      refinement ablation
+└── (ablations/refinement/)      the refinement ablation runs
 
 assets/                          few-shot examples and the blank images
 jobs/                            SLURM jobs, one per stage
@@ -153,15 +164,12 @@ env.example.sh                   template for env.sh
 
 ### Decomposition
 
-Splits each hypothesis into atomic facts, using few-shot prompting with
-BM25-retrieved examples from `demons.json`.
+Splits each hypothesis into atomic facts.
 
 ```bash
 mkdir -p Logs
 sbatch jobs/job_decompose.sh MODEL SPLIT [LIMIT]
 ```
-
-Arguments are positional:
 
 ```bash
 sbatch jobs/job_decompose.sh qwen3 dev 10        # quick check
@@ -170,10 +178,7 @@ sbatch --partition=gpu-a100-80g --mem=80G --gres=gpu:a100:1 --time=3-00:00:00 \
        jobs/job_decompose.sh qwen32 train        # main run
 ```
 
-The job defaults to `gpu-short` with 48 GB, which suits the 8B models. Override
-partition and memory for `qwen32` as shown. `Logs/` must exist before submitting.
-
-Without SLURM:
+`Logs/` must exist before submitting. Without SLURM:
 
 ```bash
 source env.sh
@@ -193,25 +198,16 @@ python -m src.decomposition.decompose --model qwen32 --split train
 | `qwen3` | `Qwen/Qwen3-8B` | 24 GB | decomposer comparison |
 | `llama` | `meta-llama/Meta-Llama-3.1-8B-Instruct` | 24 GB | decomposer comparison |
 
-Weights download from the HuggingFace Hub into `$HF_HOME` on first use. Llama is
-gated: set `HF_TOKEN` and accept the licence on its model page.
-
-Output goes to `$DATA_ROOT/Output/decompose_atoms_<model>_<split>.jsonl`, with a
-matching `_debug` file holding the raw model output. Decoding is greedy, so
-repeated runs give identical output. Runs append and resume from the last
-completed record, so a job that hits its walltime can be resubmitted unchanged.
+Llama is gated: set `HF_TOKEN` and accept the licence on its model page.
 
 ### Prediction
 
-Runs the VLMs over each image with the full hypothesis and with the atomic facts
-from the decomposition stage. Both prompt styles, simple and structured, run
-together from a single model load.
+Runs the VLMs over each image. Both prompt styles run together from a single
+model load.
 
 ```bash
 sbatch jobs/job_predict.sh VLM SPLIT METHOD [LIMIT]
 ```
-
-Arguments are positional:
 
 ```bash
 sbatch jobs/job_predict.sh internvl dev all 10   # quick check, all methods
@@ -247,9 +243,8 @@ python -m src.prediction.predict --vlm internvl --split test --method all
 | `qwen2vl_2b` | `Qwen/Qwen2-VL-2B-Instruct` | bfloat16 | baseline |
 | `internvl3_1b` | `OpenGVLab/InternVL3-1B-hf` | bfloat16 | baseline |
 
-`qwen3` and `internvl` form the AVE prediction pool and run all four prediction
-methods. The other five appear in the VLM comparison, which uses full-hypothesis
-prediction, so `all` resolves to `baseline` for them.
+`qwen3` and `internvl` form the AVE prediction pool. The other five appear only
+in the VLM comparison, so `all` resolves to `baseline` for them.
 
 | Method | What the VLM sees |
 |---|---|
@@ -258,14 +253,10 @@ prediction, so `all` resolves to `baseline` for them.
 | `selfdecompose` | the hypothesis, decomposed by the VLM itself |
 | `independent` | one atomic fact at a time |
 
-Output goes to `$DATA_ROOT/Output/<vlm>_predictions/<method>_<prompt>_<split>.jsonl`,
-with a matching `_debug` file. Runs resume by input line index, so a job that
-hits its walltime can be resubmitted unchanged.
-
 #### Hypothesis bias
 
-Replacing the image with a blank one tests whether predictions depend on
-visual content or on the hypothesis text alone.
+Replaces the image with a blank one, to test whether predictions depend on the
+image or on the hypothesis text alone.
 
 ```bash
 sbatch jobs/job_predict_bias.sh VLM SPLIT IMAGE [LIMIT]
@@ -276,16 +267,12 @@ sbatch jobs/job_predict_bias.sh internvl test black
 sbatch jobs/job_predict_bias.sh internvl test white
 ```
 
-`IMAGE` is `black` or `white`, and the blank images come from `assets/`. The
-check covers the two pipeline VLMs and the full-hypothesis and joint atomic
-methods, so `--method all` resolves to those two. Output goes to
-`$DATA_ROOT/Output/<split>_dataset/hypothesis_bias/<vlm>_<image>/`, which is
-where `src/results/hypothesis_bias.py` reads from.
+`IMAGE` is `black` or `white`, taken from `assets/`. Covers the two pipeline
+VLMs and the full-hypothesis and joint atomic methods.
 
 ### Selection
 
-Combines the candidate predictions into one label. Both approaches read the
-prediction files written by the previous stage and run on CPU.
+Combines the candidate predictions into one label. CPU only.
 
 #### Majority voting
 
@@ -293,15 +280,12 @@ prediction files written by the previous stage and run on CPU.
 sbatch jobs/job_voting.sh
 ```
 
-Reports the best individual candidates, intra-model voting per VLM (K=6),
-inter-model voting over the full pool (K=12), and the oracle upper bound.
-Output goes to `$DATA_ROOT/Output/majority_voting_summary/`.
+Intra-model voting per VLM (K=6), inter-model voting over the full pool (K=12),
+and the oracle upper bound.
 
 #### Learned selection
 
-Training compares four feature variants against seven classifier
-configurations on one fixed stratified split, then saves the best model per
-variant.
+Trains a classifier to pick the final label from the candidate pool.
 
 ```bash
 sbatch jobs/job_train_selector.sh [OUTPUT_NAME]
@@ -327,42 +311,33 @@ sbatch jobs/job_evaluate_selector.sh dev [TRAIN_RUN_NAME]
 sbatch jobs/job_evaluate_selector.sh test [TRAIN_RUN_NAME]
 ```
 
-The post-training analyses are separate, since they take considerably longer
-than training itself:
+The post-training analyses take considerably longer than training itself, so
+they are separate:
 
 ```bash
 sbatch jobs/job_analysis.sh [OUTPUT_NAME]
 ```
 
-This runs the data-efficiency sweep, permutation importance, and the
-selector-objective ablation, and writes the figures. Use
-`--skip data_efficiency importance objective` to redraw the figures from the
-saved CSVs without recomputing.
-
-Training is seeded, so a rerun reproduces the same model and the same
-validation metrics.
+Use `--skip data_efficiency importance objective` to redraw the figures from
+the saved CSVs without recomputing. Training is seeded, so a rerun reproduces
+the same model.
 
 ### Grounding
 
-Links the selected prediction to visible image regions. Grounding applies only
-to entailment and contradiction predictions, and only when the selected
-candidate agrees with the final label; the evaluation stage marks which rows
-qualify.
-
-Three steps, in order.
+Links the selected prediction to visible image regions. Three steps, in order.
+Only entailment and contradiction predictions are grounded; the evaluation
+stage marks which rows qualify.
 
 #### Phrase extraction
 
-Qwen3-8B turns each piece of evidence from the selected candidate's reasoning
-into a short visual phrase, plus a shorter match phrase used later for
-Flickr30k Entities matching.
+Turns the selected candidate's reasoning into short visual phrases.
 
 ```bash
 sbatch jobs/job_grounding_phrases.sh SPLIT [LIMIT]
 ```
 
-Extraction stops once each groundable label reaches `--target-per-label`,
-2500 by default, so grounding runs on a sample rather than the whole split.
+Stops at `--target-per-label`, 2500 by default, so grounding runs on a sample
+rather than the whole split.
 
 #### Detection
 
@@ -370,11 +345,8 @@ Extraction stops once each groundable label reaches `--target-per-label`,
 sbatch jobs/job_grounding_detect.sh SPLIT [LIMIT]
 ```
 
-Grounding DINO localises each phrase. Near-duplicate boxes are suppressed and
-the top three are kept, which is what makes Recall@3 and Mean IoU@3 meaningful.
-Two figures are written per row: a diagnostic panel showing the hypothesis,
-atoms, phrases and reasoning beside the boxed image, and a report-ready image
-with the boxes alone. Pass `--no-images` to skip both.
+Grounding DINO localises each phrase and draws the boxes. Pass `--no-images`
+to skip the figures.
 
 | Setting | Value |
 |---|---|
@@ -389,10 +361,8 @@ with the boxes alone. Pass `--no-images` to skip both.
 sbatch jobs/job_grounding_summary.sh SPLIT
 ```
 
-Matches each phrase to human-annotated Flickr30k Entities phrases, then reports
-coverage, Recall@1, Recall@3 and mean best IoU@3 over matched rows, split by
-predicted label. Reads `annotations.zip` directly, so the archive does not need
-unpacking.
+Scores the boxes against Flickr30k Entities. Reads `annotations.zip` directly,
+so the archive does not need unpacking.
 
 Without SLURM:
 
@@ -405,12 +375,11 @@ conda activate $ENV_SELECTION
 python -m src.grounding.summary --split test
 ```
 
-Phrase extraction uses the decomposition environment, detection uses the
-grounding environment, and the evaluation needs only the standard library.
+Note the environment changes between detection and evaluation.
 
 ### Results
 
-Tables and figures built from the outputs of the earlier stages. All CPU only.
+Tables and figures built from the earlier stages' outputs. CPU only.
 
 ```bash
 sbatch jobs/job_results.sh SCRIPT [ARGS...]
@@ -433,3 +402,31 @@ sbatch jobs/job_results.sh ave_ls_summary
 `vlm_comparison` takes `--split`; the others read both splits themselves.
 `hypothesis_bias` and `ablation_summary` need the corresponding ablation runs
 to have been done first.
+
+### Refinement ablation
+
+Two ways of revisiting a prediction with extra evidence. Both start from the
+same initial prediction and feed `src/results/ablation_summary.py`. The scripts
+live in `ablations/refinement/`, since refinement is not part of AVE.
+
+#### QA-assisted
+
+```bash
+sbatch jobs/job_question_generation.sh SPLIT
+sbatch jobs/job_qa_answer_generation.sh SPLIT
+sbatch jobs/job_qa_refinement.sh SPLIT
+```
+
+In order: questions are generated, answered against the image, and used to
+keep or overturn the initial prediction.
+
+#### Caption-assisted
+
+```bash
+sbatch jobs/job_caption_generation.sh [LIMIT]
+sbatch jobs/job_caption_refinement.sh [LIMIT]
+```
+
+Florence-2 captions every image once, then the judge works from the caption
+instead of the image. Captioning takes several hours; `LIMIT` is for testing.
+

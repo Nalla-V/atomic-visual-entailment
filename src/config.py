@@ -37,14 +37,11 @@ def input_file(split):
     return os.path.join(INPUT_DIR, f"snli_ve_{split}.jsonl")
 
 
-def output_file(stem, model_key, split, debug=False):
-    suffix = "_debug" if debug else ""
-    return os.path.join(OUTPUT_DIR, f"{stem}_{model_key}_{split}{suffix}.jsonl")
-
-
-def atoms_file(split, decomposer="qwen32"):
+def atoms_file(split, decomposer="qwen32", debug=False):
     """Decomposition output, which is the input to prediction."""
-    return output_file("decompose_atoms", decomposer, split)
+    suffix = "_debug" if debug else ""
+    return os.path.join(OUTPUT_DIR, f"{split}_dataset",
+                        f"decompose_atoms_{decomposer}_{split}{suffix}.jsonl")
 
 
 def prediction_file(vlm_dir, method, prompt, split, debug=False):

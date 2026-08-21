@@ -195,12 +195,11 @@ def main():
     ap.add_argument("--split", default="train", choices=config.SPLITS)
     ap.add_argument("--limit", type=int, default=None, help="stop after N records")
     ap.add_argument("--input-file", default=None, help="override the input jsonl")
-    ap.add_argument("--output-stem", default="decompose_atoms")
     args = ap.parse_args()
 
     input_file = args.input_file or config.input_file(args.split)
-    success_file = config.output_file(args.output_stem, args.model, args.split)
-    debug_file = config.output_file(args.output_stem, args.model, args.split, debug=True)
+    success_file = config.atoms_file(args.split, args.model)
+    debug_file = config.atoms_file(args.split, args.model, debug=True)
     progress_every = config.PROGRESS_EVERY[args.split]
 
     if not os.path.exists(input_file):
