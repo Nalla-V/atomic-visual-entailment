@@ -131,12 +131,18 @@ src/
 │   ├── classifiers.py           classifier configurations
 │   ├── candidates.py            the K=12 candidate pool
 │   └── common.py                metrics and shared helpers
-└── grounding/
-    ├── phrases.py               reasoning to groundable phrases
-    ├── detect.py                Grounding DINO boxes and figures
-    ├── summary.py               Flickr30k Entities evaluation
-    ├── prompts.py               phrase extraction prompt
-    └── common.py                phrase cleaning helpers
+├── grounding/
+│   ├── phrases.py               reasoning to groundable phrases
+│   ├── detect.py                Grounding DINO boxes and figures
+│   ├── summary.py               Flickr30k Entities evaluation
+│   ├── prompts.py               phrase extraction prompt
+│   └── common.py                phrase cleaning helpers
+└── results/
+    ├── vlm_comparison.py        VLM comparison on full-hypothesis prediction
+    ├── candidate_analysis.py    all candidate configurations, by method and prompt
+    ├── ave_ls_summary.py        AVE-LS against majority voting
+    ├── hypothesis_bias.py       blank-image comparison
+    └── ablation_summary.py      refinement ablation
 
 jobs/                            SLURM jobs, one per stage
 envs/                            pip requirements, one per stage
@@ -381,3 +387,29 @@ python -m src.grounding.summary --split test
 
 Phrase extraction uses the decomposition environment, detection uses the
 grounding environment, and the evaluation needs only the standard library.
+
+### Results
+
+Tables and figures built from the outputs of the earlier stages. All CPU only.
+
+```bash
+sbatch jobs/job_results.sh SCRIPT [ARGS...]
+```
+
+| Script | What it reports |
+|---|---|
+| `vlm_comparison` | each VLM's best full-hypothesis configuration |
+| `candidate_analysis` | every configuration of VLM, method, prompt and label derivation |
+| `ave_ls_summary` | AVE-LS against majority voting, including the paired test |
+| `hypothesis_bias` | accuracy with the real image against a blank one |
+| `ablation_summary` | the refinement ablation |
+
+```bash
+sbatch jobs/job_results.sh vlm_comparison --split dev
+sbatch jobs/job_results.sh candidate_analysis
+sbatch jobs/job_results.sh ave_ls_summary
+```
+
+`vlm_comparison` takes `--split`; the others read both splits themselves.
+`hypothesis_bias` and `ablation_summary` need the corresponding ablation runs
+to have been done first.
