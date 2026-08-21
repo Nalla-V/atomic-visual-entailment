@@ -2,11 +2,19 @@
 
 import os
 
+REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ASSETS_DIR = os.path.join(REPO_DIR, "assets")
+
 DATA_ROOT = os.environ.get("DATA_ROOT", os.path.abspath("."))
 INPUT_DIR = os.path.join(DATA_ROOT, "Input")
 OUTPUT_DIR = os.path.join(DATA_ROOT, "Output")
-DEMONS_JSON = os.path.join(INPUT_DIR, "demons.json")
 IMAGE_DIR = os.path.join(INPUT_DIR, "flickr30k_images")
+
+# Ships with the repository: hand-written few-shot examples and the blank
+# images used for the hypothesis-bias check.
+DEMONS_JSON = os.path.join(ASSETS_DIR, "demons.json")
+BLACK_IMAGE = os.path.join(ASSETS_DIR, "black.png")
+WHITE_IMAGE = os.path.join(ASSETS_DIR, "white.png")
 
 HF_TOKEN = os.environ.get("HF_TOKEN") or None
 HF_CACHE_DIR = os.environ.get("HF_HOME") or None
@@ -43,6 +51,15 @@ def prediction_file(vlm_dir, method, prompt, split, debug=False):
     suffix = "_debug" if debug else ""
     return os.path.join(
         OUTPUT_DIR, vlm_dir, f"{method}_{prompt}_{split}{suffix}.jsonl"
+    )
+
+
+def bias_prediction_file(vlm_dir, image, method, prompt, split, debug=False):
+    """Blank-image predictions for the hypothesis-bias check."""
+    suffix = "_debug" if debug else ""
+    return os.path.join(
+        OUTPUT_DIR, f"{split}_dataset", "hypothesis_bias",
+        f"{vlm_dir}_{image}", f"{method}_{prompt}_{split}{suffix}.jsonl"
     )
 
 

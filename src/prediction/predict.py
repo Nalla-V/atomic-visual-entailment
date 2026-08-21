@@ -2,7 +2,12 @@
 
     python -m src.prediction.predict --vlm internvl --split dev --method joint
 
-Both prompt variants run from one model load. Resume is by input line index.
+Both prompt variants run from one model load. Resume is by input line index,
+so identical rows are predicted independently.
+
+Passing --image black or --image white replaces the real image with a blank
+one, which is the hypothesis-bias check. That restricts the run to the
+full-hypothesis and joint atomic methods and writes to a separate folder.
 """
 
 import argparse
@@ -64,6 +69,11 @@ def _error_result(message):
         "per_atom": [],
         "parse_ok": False,
         "parse_error": message,
+        "fallback_used": False,
+        "parse_mode": "",
+        "parser": "plain",
+        "hf_id": "",
+        "vlm_key": "",
         "confidence_score": 0.0,
         "margin": 0.0,
         "entropy": 0.0,
@@ -73,17 +83,31 @@ def _error_result(message):
     }
 
 
+def output_paths(vlm, vlm_dir, method, variant, split, image):
+    """Real-image runs go to the normal prediction folder. Blank-image runs go
+    to the hypothesis-bias folder for that VLM and colour."""
+    if image == "real":
+        main_path = config.prediction_file(vlm_dir, method.OUTPUT_NAME, variant, split)
+        debug_path = config.prediction_file(
+            vlm_dir, method.OUTPUT_NAME, variant, split, debug=True)
+    else:
+        bias_dir = models.BIAS_DIRS[vlm]
+        main_path = config.bias_prediction_file(
+            bias_dir, image, method.OUTPUT_NAME, variant, split)
+        debug_path = config.bias_prediction_file(
+            bias_dir, image, method.OUTPUT_NAME, variant, split, debug=True)
+    return main_path, debug_path
+
+
 def run_method(adapter, vlm, method_name, input_file, vlm_dir,
-               split, limit, progress_every):
+               split, limit, progress_every, image="real"):
     method = _load_method(method_name)
     variants = list(method.VARIANTS)
 
     paths = {}
     for variant in variants:
-        main_path = config.prediction_file(vlm_dir, method.OUTPUT_NAME, variant, split)
-        debug_path = config.prediction_file(
-            vlm_dir, method.OUTPUT_NAME, variant, split, debug=True
-        )
+        main_path, debug_path = output_paths(
+            vlm, vlm_dir, method, variant, split, image)
         ensure_parent_dir(main_path)
         paths[variant] = (main_path, debug_path)
 
@@ -95,6 +119,8 @@ def run_method(adapter, vlm, method_name, input_file, vlm_dir,
     for v in variants:
         print(f"  {v:<12} {done[v]:>7} rows -> {paths[v][0]}")
     print(f"  resuming at input row {start_at}", flush=True)
+
+    blank = None if image == "real" else image
 
     writers = {}
     try:
@@ -117,7 +143,7 @@ def run_method(adapter, vlm, method_name, input_file, vlm_dir,
                 record = method.prepare(read_input_record(obj, vlm))
 
                 try:
-                    image_ref = adapter.load_image(record["img_id"])
+                    image_ref = adapter.load_image(record["img_id"], blank=blank)
 
                     for v in variants:
                         if i < done[v]:
@@ -175,16 +201,26 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--vlm", required=True, choices=sorted(models.VLM_MODELS))
     ap.add_argument("--split", required=True, choices=config.SPLITS)
-    ap.add_argument("--method", default=None,
+    ap.add_argument("--method", required=True,
                     help="one method, or 'all' for every method this VLM supports")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--input-file", default=None)
     ap.add_argument("--decomposer", default="qwen32")
+    ap.add_argument("--image", default="real", choices=["real", "black", "white"],
+                    help="blank image for the hypothesis-bias check")
     args = ap.parse_args()
 
     available = models.methods_for(args.vlm)
 
-    if args.method is None or args.method == "all":
+    # The bias check covers full-hypothesis and joint atomic prediction only.
+    if args.image != "real":
+        if args.vlm not in models.BIAS_DIRS:
+            raise SystemExit(
+                f"The hypothesis-bias check covers: "
+                f"{', '.join(sorted(models.BIAS_DIRS))}")
+        available = [m for m in available if m in models.BIAS_METHODS]
+
+    if args.method == "all":
         methods = available
     elif args.method in available:
         methods = [args.method]
@@ -204,13 +240,14 @@ def main():
     print(f"VLM     : {args.vlm}")
     print(f"Split   : {args.split}")
     print(f"Methods : {', '.join(methods)}")
+    print(f"Image   : {args.image}")
     print(f"Input   : {input_file}", flush=True)
 
     adapter = models.load(args.vlm)
 
     for method_name in methods:
         run_method(adapter, args.vlm, method_name, input_file, vlm_dir,
-                   args.split, args.limit, progress_every)
+                   args.split, args.limit, progress_every, args.image)
 
     print("\nAll done.", flush=True)
 

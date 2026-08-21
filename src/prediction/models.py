@@ -1,7 +1,8 @@
 """VLM registry and adapters.
 
-Families differ in three ways: which class loads them, whether the processor takes a PIL image or 
-a file path via qwen_vl_utils. Both are declared per model in VLM_MODELS.
+Families differ in three ways: which class loads them, whether the processor
+takes a PIL image or a file path via qwen_vl_utils, and which precision they
+run in. All are declared per model in VLM_MODELS.
 """
 
 import os
@@ -89,6 +90,12 @@ OUTPUT_DIRS = {
     "idefics2": "idefics2_predictions",
 }
 
+# Short names used by the hypothesis-bias output folders.
+BIAS_DIRS = {"qwen3": "qwen3", "internvl": "internvl"}
+
+# The bias check covers full-hypothesis and joint atomic prediction only.
+BIAS_METHODS = ["baseline", "joint"]
+
 
 def methods_for(vlm_key):
     return METHODS_BY_VLM.get(vlm_key, DEFAULT_METHODS)
@@ -121,8 +128,16 @@ class VLMAdapter:
         self.hf_id = hf_id
         self.vlm_key = vlm_key
 
-    def load_image(self, img_id):
-        path = image_path(img_id)
+    def load_image(self, img_id, blank=None):
+        """blank is None for the real image, or 'black' / 'white' for the
+        hypothesis-bias check."""
+        if blank == "black":
+            path = config.BLACK_IMAGE
+        elif blank == "white":
+            path = config.WHITE_IMAGE
+        else:
+            path = image_path(img_id)
+
         if not os.path.exists(path):
             raise FileNotFoundError(f"Image not found: {path}")
         if self.images == "vision_info":
@@ -234,5 +249,5 @@ def load(vlm_key):
     print("Model loaded.", flush=True)
 
     return VLMAdapter(model, processor, spec["images"],
-                     parser=spec.get("parser", "plain"),
-                     hf_id=hf_id, vlm_key=vlm_key)
+                      parser=spec.get("parser", "plain"),
+                      hf_id=hf_id, vlm_key=vlm_key)

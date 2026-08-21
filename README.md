@@ -99,7 +99,6 @@ $DATA_ROOT/
 │   ├── snli_ve_train.jsonl
 │   ├── snli_ve_dev.jsonl
 │   ├── snli_ve_test.jsonl
-│   ├── demons.json              (included in this repository)
 │   ├── flickr30k_images/        (needed from the prediction stage on)
 │   └── flickr30k_entities/      (grounding evaluation only)
 └── Output/                      (created automatically)
@@ -144,6 +143,7 @@ src/
     ├── hypothesis_bias.py       blank-image comparison
     └── ablation_summary.py      refinement ablation
 
+assets/                          few-shot examples and the blank images
 jobs/                            SLURM jobs, one per stage
 envs/                            pip requirements, one per stage
 env.example.sh                   template for env.sh
@@ -261,6 +261,26 @@ prediction, so `all` resolves to `baseline` for them.
 Output goes to `$DATA_ROOT/Output/<vlm>_predictions/<method>_<prompt>_<split>.jsonl`,
 with a matching `_debug` file. Runs resume by input line index, so a job that
 hits its walltime can be resubmitted unchanged.
+
+#### Hypothesis bias
+
+Replacing the image with a blank one tests whether predictions depend on
+visual content or on the hypothesis text alone.
+
+```bash
+sbatch jobs/job_predict_bias.sh VLM SPLIT IMAGE [LIMIT]
+```
+
+```bash
+sbatch jobs/job_predict_bias.sh internvl test black
+sbatch jobs/job_predict_bias.sh internvl test white
+```
+
+`IMAGE` is `black` or `white`, and the blank images come from `assets/`. The
+check covers the two pipeline VLMs and the full-hypothesis and joint atomic
+methods, so `--method all` resolves to those two. Output goes to
+`$DATA_ROOT/Output/<split>_dataset/hypothesis_bias/<vlm>_<image>/`, which is
+where `src/results/hypothesis_bias.py` reads from.
 
 ### Selection
 
