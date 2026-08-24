@@ -11,6 +11,9 @@ vision-language models, combines the resulting predictions into one label, and
 localises the visual evidence behind that label without region-level
 supervision.
 
+Model outputs from every stage of the pipeline are archived at
+[doi.org/10.5281/zenodo.22051313](https://doi.org/10.5281/zenodo.22051313).
+
 | Stage | What it does |
 |---|---|
 | Decomposition | hypothesis to atomic facts |
@@ -113,6 +116,9 @@ $DATA_ROOT/
 │   └── flickr30k_entities/      (grounding evaluation only)
 └── Output/                      (created automatically)
 ```
+The archived outputs let the selection, grounding and results stages be
+reproduced without a GPU: download the prediction archives, extract them into
+`$DATA_ROOT`, and run those stages directly.
 
 ## Repository layout
 
