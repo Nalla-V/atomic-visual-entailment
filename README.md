@@ -14,6 +14,63 @@ supervision.
 Model outputs from every stage of the pipeline are archived at
 [doi.org/10.5281/zenodo.22051313](https://doi.org/10.5281/zenodo.22051313).
 
+## Results
+
+All numbers are SNLI-VE accuracy with frozen vision-language models and no
+visual-entailment training.
+
+| Method | Dev | Test |
+| --- | --- | --- |
+| Best single VLM, full hypothesis | 0.749 | 0.754 |
+| Best single atomic configuration | 0.762 | 0.765 |
+| AVE-MV (majority voting, K=12) | 0.765 | 0.769 |
+| **AVE-LS (learned selection)** | **0.799** | **0.803** |
+| Oracle over the K=12 pool | 0.941 | 0.941 |
+
+Learned selection beats majority voting by 3.4 points and closes the gap to the
+oracle from 17.2 to 13.8 points on test. The two disagree on a large number of
+instances, and the split is not close to even: AVE-LS recovers 1,271 test cases
+majority voting gets wrong while losing 661, a 65.8% win rate on disagreements
+(McNemar, p = 2.3 x 10^-44).
+
+Against published work on SNLI-VE, AVE-LS leads the zero-shot and hybrid
+methods by a wide margin — CLIP Res50x16 reaches 0.682, IMMO 0.657, IdealGPT
+0.553 — and lands among supervised models trained on the task, above
+UNITER-Large (0.794) and level with VILLA-Large (0.800) and CLIP-ViL (0.802).
+
+**Where the gain comes from.** Neutral is the hardest label for every method
+here. AVE-LS raises neutral recall from 0.551 to 0.682 on test, the largest
+single improvement in the system, and entailment recall from 0.832 to 0.857.
+It pays for this with contradiction recall, down from 0.923 to 0.871.
+Contradiction still ends up the most reliable label and neutral the least, but
+the selector is clearly trading the easy class for the hard one.
+
+**Grounding**, evaluated against Flickr30k Entities with no region-level
+supervision anywhere in the pipeline:
+
+| Predicted label | Coverage | Recall@1 | Recall@3 | Mean IoU@3 |
+| --- | --- | --- | --- | --- |
+| Entailment | 86.9% | 0.823 | 0.896 | 0.843 |
+| Contradiction | 77.3% | 0.852 | 0.904 | 0.847 |
+| Overall | 82.1% | 0.837 | 0.900 | 0.845 |
+
+Coverage is lower for contradiction because contradiction evidence often
+concerns something absent or an attribute mismatch, rather than a named object
+a detector can find.
+
+**Two negative results**, both reported in full in the thesis:
+
+*Refinement hurts.* Revisiting a prediction with extra textual evidence lowers
+accuracy in both variants tried — QA-assisted to 0.695, caption-assisted to
+0.618, against 0.762 for the initial atomic prediction. The judge never sees
+the image, so it depends entirely on intermediate text, and when that text
+misses a visual detail the judge overturns a correct prediction. This is why
+refinement sits in `ablations/` rather than in the pipeline.
+
+*Predictions do use the image.* Replacing the image with a blank one collapses
+accuracy from 0.72–0.76 to 0.33–0.40, near chance on the three balanced labels.
+The models are not solving SNLI-VE from hypothesis text alone.
+
 | Stage | What it does |
 |---|---|
 | Decomposition | hypothesis to atomic facts |
